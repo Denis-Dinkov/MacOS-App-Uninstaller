@@ -1,0 +1,209 @@
+import AppKit
+import SwiftUI
+
+@MainActor
+final class Model: ObservableObject {
+    @Published var apps: [AppInfo] = []
+    @Published var search = ""
+    @Published var selectedID: URL? { didSet { if selectedID != oldValue { scan() } } }
+    @Published var items: [Leftover] = []
+    @Published var scanning = false
+    @Published var working = false
+    @Published var showResult = false
+    @Published var resultMessage = ""
+    @Published var showAdminPrompt = false
+
+    @Published var hasFullDiskAccess = Scanner.hasFullDiskAccess()
+
+    private var scanToken = 0
+
+    func recheckPermissions() {
+        let granted = Scanner.hasFullDiskAccess()
+        guard granted != hasFullDiskAccess else { return }
+        hasFullDiskAccess = granted
+        if granted { scan() }
+    }
+
+    func openFullDiskAccessSettings() {
+        let link = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+    }
+
+    func relaunch() {
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+    private var failed: [Leftover] = []
+    private var freed: Int64 = 0
+    private var removedCount = 0
+
+    init() {
+        reloadApps()
+        // Optional: `AppSweeper --select /Applications/Foo.app` opens with that app selected.
+        let args = CommandLine.arguments
+        if let flag = args.firstIndex(of: "--select"), args.count > flag + 1 {
+            addApp(URL(fileURLWithPath: args[flag + 1]))
+        }
+    }
+
+    var selected: AppInfo? { apps.first { $0.id == selectedID } }
+
+    var filteredApps: [AppInfo] {
+        guard !search.isEmpty else { return apps }
+        return apps.filter {
+            $0.name.localizedCaseInsensitiveContains(search)
+                || $0.bundleID.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    var selectedItems: [Leftover] { items.filter(\.selected) }
+    var selectedSize: Int64 { selectedItems.reduce(0) { $0 + $1.size } }
+    var failedCount: Int { failed.count }
+
+    func reloadApps() {
+        // Keep manually dropped apps that live outside the standard folders.
+        let extra = apps.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        var merged = Dictionary(uniqueKeysWithValues: extra.map { ($0.url, $0) })
+        for app in Scanner.loadApps() { merged[app.url] = app }
+        apps = merged.values.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    func addApp(_ url: URL) {
+        guard !url.path.hasPrefix("/System"), let info = Scanner.appInfo(at: url),
+            info.url != Bundle.main.bundleURL.standardizedFileURL
+        else { return }
+        if !apps.contains(info) {
+            apps.append(info)
+            apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
+        search = ""
+        selectedID = info.id
+    }
+
+    func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            guard let url, url.pathExtension == "app" else { return }
+            Task { @MainActor in self.addApp(url) }
+        }
+        return true
+    }
+
+    func scan() {
+        scanToken += 1
+        let token = scanToken
+        items = []
+        guard let app = selected else {
+            scanning = false
+            return
+        }
+        scanning = true
+        let others = Set(apps.map(\.bundleID)).subtracting([app.bundleID])
+        Task.detached(priority: .userInitiated) {
+            let found = Scanner.findLeftovers(for: app, otherBundleIDs: others)
+            await MainActor.run {
+                guard token == self.scanToken else { return }
+                self.items = found
+                self.scanning = false
+            }
+        }
+    }
+
+    func setAll(_ value: Bool) {
+        for index in items.indices { items[index].selected = value }
+    }
+
+    func toggle(_ id: URL) -> Binding<Bool> {
+        Binding(
+            get: { self.items.first { $0.id == id }?.selected ?? false },
+            set: { value in
+                if let index = self.items.firstIndex(where: { $0.id == id }) {
+                    self.items[index].selected = value
+                }
+            })
+    }
+
+    // MARK: - Uninstall
+
+    func uninstall() {
+        guard let app = selected, !working else { return }
+        recheckPermissions()
+        guard hasFullDiskAccess else { return }
+        let targets = selectedItems
+        guard !targets.isEmpty else { return }
+        working = true
+        let quitFirst = targets.contains(where: \.isApp) && !app.bundleID.isEmpty
+        let bundleID = app.bundleID
+
+        Task.detached(priority: .userInitiated) {
+            if quitFirst { Self.quit(bundleID: bundleID) }
+            var freed: Int64 = 0
+            var removed = 0
+            var failed: [Leftover] = []
+            for target in targets {
+                do {
+                    try FileManager.default.trashItem(at: target.url, resultingItemURL: nil)
+                    freed += target.size
+                    removed += 1
+                } catch {
+                    // Already gone counts as success; everything else needs elevation.
+                    if FileManager.default.fileExists(atPath: target.url.path) { failed.append(target) }
+                }
+            }
+            let result = (freed, removed, failed)
+            await MainActor.run {
+                self.freed = result.0
+                self.removedCount = result.1
+                self.failed = result.2
+                if result.2.isEmpty { self.finish() } else { self.showAdminPrompt = true }
+            }
+        }
+    }
+
+    nonisolated private static func quit(bundleID: String) {
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        guard !running.isEmpty else { return }
+        running.forEach { $0.terminate() }
+        for _ in 0..<15 where running.contains(where: { !$0.isTerminated }) {
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        running.filter { !$0.isTerminated }.forEach { $0.forceTerminate() }
+        Thread.sleep(forTimeInterval: 0.3)
+    }
+
+    func removeFailedWithAdmin() {
+        let pending = failed
+        if Scanner.removeWithAdmin(pending.map(\.url)) {
+            let gone = pending.filter { !FileManager.default.fileExists(atPath: $0.url.path) }
+            freed += gone.reduce(0) { $0 + $1.size }
+            removedCount += gone.count
+            failed = pending.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        }
+        finish()
+    }
+
+    func finish() {
+        working = false
+        var message = "Items removed: \(removedCount)\nSpace freed: \(Scanner.format(freed))"
+        if !failed.isEmpty {
+            message += "\n\nCould not be removed (\(failed.count)):\n"
+                + failed.prefix(8).map(\.url.path).joined(separator: "\n")
+        }
+        resultMessage = message
+        failed = []
+        showResult = true
+
+        let current = selectedID
+        reloadApps()
+        if let current, apps.contains(where: { $0.id == current }) {
+            scan()
+        } else {
+            selectedID = nil
+        }
+    }
+}
