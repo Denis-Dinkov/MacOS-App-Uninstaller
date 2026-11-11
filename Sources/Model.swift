@@ -12,6 +12,12 @@ final class Model: ObservableObject {
     @Published var showResult = false
     @Published var resultMessage = ""
 
+    enum Mode { case uninstall, cleanup }
+    /// Which sidebar entry is active.
+    enum Section { case apps, background, cleanup }
+    @Published var section: Section = .apps
+    @Published var mode: Mode = .uninstall
+
     @Published var hasFullDiskAccess = Scanner.hasFullDiskAccess()
 
     private var scanToken = 0
@@ -46,6 +52,8 @@ final class Model: ObservableObject {
         if let flag = args.firstIndex(of: "--select"), args.count > flag + 1 {
             addApp(URL(fileURLWithPath: args[flag + 1]))
         }
+        // `AppSweeper --cleanup` opens directly in Free Up Space mode.
+        if args.contains("--cleanup") { showCleanup() }
     }
 
     var selected: AppInfo? { apps.first { $0.id == selectedID } }
@@ -67,6 +75,8 @@ final class Model: ObservableObject {
         let extra = apps.filter { FileManager.default.fileExists(atPath: $0.url.path) }
         var merged = Dictionary(uniqueKeysWithValues: extra.map { ($0.url, $0) })
         for app in Scanner.loadApps() { merged[app.url] = app }
+        let installed = merged.values.filter { $0.agentLabel == nil }
+        for agent in Scanner.loadAgents(apps: installed) { merged[agent.url] = agent }
         apps = merged.values.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
@@ -81,7 +91,7 @@ final class Model: ObservableObject {
             apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
         search = ""
-        selectedID = info.id
+        select(info)
     }
 
     func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -93,10 +103,65 @@ final class Model: ObservableObject {
         return true
     }
 
+    func go(_ target: Section) {
+        search = ""
+        section = target
+        if target == .cleanup {
+            showCleanup()
+            return
+        }
+        if mode != .uninstall {
+            mode = .uninstall
+            scanToken += 1
+            items = []
+            scanning = false
+        }
+        selectedID = nil
+    }
+
+    func back() { selectedID = nil }
+
+    func showCleanup() {
+        section = .cleanup
+        guard mode != .cleanup else { return }
+        mode = .cleanup
+        // Clearing the selection triggers scan(), which now runs the junk scan.
+        if selectedID != nil { selectedID = nil } else { scan() }
+    }
+
+    func select(_ app: AppInfo) {
+        if mode != .uninstall {
+            mode = .uninstall
+            scanToken += 1
+            items = []
+            scanning = false
+        }
+        section = app.agentLabel == nil ? .apps : .background
+        selectedID = app.id
+    }
+
+    func setCategory(_ category: String, _ value: Bool) {
+        for index in items.indices where items[index].category == category {
+            items[index].selected = value
+        }
+    }
+
     func scan() {
         scanToken += 1
         let token = scanToken
         items = []
+        if mode == .cleanup {
+            scanning = true
+            Task.detached(priority: .userInitiated) {
+                let found = Scanner.findJunk()
+                await MainActor.run {
+                    guard token == self.scanToken else { return }
+                    self.items = found
+                    self.scanning = false
+                }
+            }
+            return
+        }
         guard let app = selected else {
             scanning = false
             return
@@ -130,17 +195,22 @@ final class Model: ObservableObject {
     // MARK: - Uninstall
 
     func uninstall() {
-        guard let app = selected, !working else { return }
+        guard !working, mode == .cleanup || selected != nil else { return }
         recheckPermissions()
         guard hasFullDiskAccess else { return }
         let targets = selectedItems
         guard !targets.isEmpty else { return }
         working = true
-        let quitFirst = targets.contains(where: \.isApp) && !app.bundleID.isEmpty
-        let bundleID = app.bundleID
+        // Cleanup mode has no owning app to stop first.
+        let app = mode == .uninstall ? selected : nil
+        let quitFirst = targets.contains(where: \.isApp) && !(app?.bundleID.isEmpty ?? true)
+        let bundleID = app?.bundleID ?? ""
+        let agentLabel = app?.agentLabel
 
         Task.detached(priority: .userInitiated) {
-            if quitFirst { Self.quit(bundleID: bundleID) }
+            if quitFirst {
+                if let agentLabel { Self.stopAgent(label: agentLabel) } else { Self.quit(bundleID: bundleID) }
+            }
             var freed: Int64 = 0
             var removed = 0
             var failed: [Leftover] = []
@@ -176,6 +246,17 @@ final class Model: ObservableObject {
         }
     }
 
+    /// Unloads a launch agent so launchd stops (and no longer restarts) its process.
+    nonisolated private static func stopAgent(label: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+    }
+
     nonisolated private static func quit(bundleID: String) {
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         guard !running.isEmpty else { return }
@@ -209,6 +290,10 @@ final class Model: ObservableObject {
         failed = []
         showResult = true
 
+        if mode == .cleanup {
+            scan()
+            return
+        }
         let current = selectedID
         reloadApps()
         if let current, apps.contains(where: { $0.id == current }) {

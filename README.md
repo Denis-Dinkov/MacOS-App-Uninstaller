@@ -4,6 +4,11 @@ A small macOS app that uninstalls applications together with their leftovers
 (caches, preferences, containers, launch agents, logs, installer receipts).
 
 - Lists apps from `/Applications` and `~/Applications`; you can also drop an `.app` onto the window.
+- Also lists **background items**: launch agents that run a script or tool without an app
+  bundle. Removing one unloads it from launchd and deletes its plist and logs; the program
+  folder is shown but never preselected.
+- **Free Up Space** mode removes caches, logs, Trash contents, Xcode derived data and other
+  regenerable files. Backups, archives and system-level folders are listed but not preselected.
 - Finds leftovers by bundle identifier and app name, including embedded helpers and extensions.
 - Deletes everything directly and permanently (nothing goes to the Trash). Root-owned items
   are removed after a single administrator password prompt.
