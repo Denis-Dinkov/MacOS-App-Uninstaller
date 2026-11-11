@@ -283,7 +283,8 @@ enum Scanner {
         let safe = urls.filter { $0.pathComponents.count >= 3 && !$0.path.hasPrefix("/System") }
         guard !safe.isEmpty else { return false }
         let quoted = safe.map { "'" + $0.path.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        let shell = "/bin/rm -rf -- " + quoted.joined(separator: " ")
+        let paths = quoted.joined(separator: " ")
+        let shell = "/usr/bin/chflags -R nouchg,noschg -- \(paths) 2>/dev/null; /bin/rm -rf -- \(paths)"
         let escaped = shell
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")

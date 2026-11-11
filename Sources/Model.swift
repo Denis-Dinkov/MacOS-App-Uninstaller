@@ -11,7 +11,6 @@ final class Model: ObservableObject {
     @Published var working = false
     @Published var showResult = false
     @Published var resultMessage = ""
-    @Published var showAdminPrompt = false
 
     @Published var hasFullDiskAccess = Scanner.hasFullDiskAccess()
 
@@ -147,7 +146,7 @@ final class Model: ObservableObject {
             var failed: [Leftover] = []
             for target in targets {
                 do {
-                    try FileManager.default.trashItem(at: target.url, resultingItemURL: nil)
+                    try Self.removeDirectly(target.url)
                     freed += target.size
                     removed += 1
                 } catch {
@@ -160,8 +159,20 @@ final class Model: ObservableObject {
                 self.freed = result.0
                 self.removedCount = result.1
                 self.failed = result.2
-                if result.2.isEmpty { self.finish() } else { self.showAdminPrompt = true }
+                // Anything still left is root-owned: remove it with one password prompt.
+                if result.2.isEmpty { self.finish() } else { self.removeFailedWithAdmin() }
             }
+        }
+    }
+
+    /// Deletes an item immediately. Locked items get their immutable flag cleared first.
+    nonisolated private static func removeDirectly(_ url: URL) throws {
+        let fm = FileManager.default
+        do {
+            try fm.removeItem(at: url)
+        } catch {
+            try? fm.setAttributes([.immutable: false], ofItemAtPath: url.path)
+            try fm.removeItem(at: url)
         }
     }
 

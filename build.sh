@@ -5,7 +5,8 @@ cd "$(dirname "$0")"
 
 APP="AppSweeper.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
     Sources/*.swift -o "$APP/Contents/MacOS/AppSweeper"
@@ -19,6 +20,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key><string>AppSweeper</string>
     <key>CFBundleIdentifier</key><string>local.appsweeper</string>
     <key>CFBundleExecutable</key><string>AppSweeper</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1</string>

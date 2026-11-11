@@ -75,14 +75,6 @@ struct ContentView: View {
         } message: {
             Text(model.resultMessage)
         }
-        .alert("Administrator rights required", isPresented: $model.showAdminPrompt) {
-            Button("Delete permanently", role: .destructive) { model.removeFailedWithAdmin() }
-            Button("Skip", role: .cancel) { model.finish() }
-        } message: {
-            Text(
-                "\(model.failedCount) items could not be moved to the Trash. "
-                    + "They can be deleted with an administrator password, but that cannot be undone.")
-        }
     }
 }
 
@@ -369,12 +361,12 @@ struct DetailView: View {
         .confirmationDialog(
             "Uninstall \(app.name)?", isPresented: $confirming, titleVisibility: .visible
         ) {
-            Button("Move to Trash", role: .destructive) { model.uninstall() }
+            Button("Delete Permanently", role: .destructive) { model.uninstall() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
                 "\(model.selectedItems.count) items (\(Scanner.format(model.selectedSize))) "
-                    + "will be moved to the Trash. The app will be quit if it is running.")
+                    + "will be deleted permanently. This cannot be undone. The app will be quit if it is running.")
         }
     }
 }
